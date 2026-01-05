@@ -22,15 +22,33 @@ class DatasetLoader:
     @staticmethod
     def load_from_directory(
         directory: str,
-        extensions: Tuple[str, ...] = ('.jpg', '.jpeg', '.png', '.bmp')
+        extensions: Tuple[str, ...] = ('.jpg', '.jpeg', '.png', '.bmp'),
+        recursive: bool = False
     ) -> List[str]:
-        """Load all images from a directory"""
+        """
+        Load all images from a directory
+        
+        Args:
+            directory: Path to directory
+            extensions: Tuple of valid image extensions
+            recursive: If True, recursively search subdirectories
+            
+        Returns:
+            List of image paths
+        """
         directory = Path(directory)
         image_paths = []
         
-        for ext in extensions:
-            image_paths.extend(directory.glob(f"*{ext}"))
-            image_paths.extend(directory.glob(f"*{ext.upper()}"))
+        if recursive:
+            # Recursively find all images in subdirectories
+            for ext in extensions:
+                image_paths.extend(directory.rglob(f"*{ext}"))
+                image_paths.extend(directory.rglob(f"*{ext.upper()}"))
+        else:
+            # Only search top-level directory
+            for ext in extensions:
+                image_paths.extend(directory.glob(f"*{ext}"))
+                image_paths.extend(directory.glob(f"*{ext.upper()}"))
         
         return sorted([str(p) for p in image_paths])
     
@@ -58,20 +76,108 @@ class DatasetLoader:
     @staticmethod
     def load_multiple_directories(
         directories: List[str],
-        labels: List[str] = None
+        labels: List[str] = None,
+        recursive: bool = False
     ) -> Tuple[List[str], List[str]]:
-        """Load images from multiple directories with labels"""
+        """
+        Load images from multiple directories with labels
+        
+        Args:
+            directories: List of directory paths
+            labels: Optional labels for each directory
+            recursive: If True, recursively search subdirectories
+            
+        Returns:
+            Tuple of (image_paths, labels)
+        """
         all_paths = []
         all_labels = []
         
         for i, directory in enumerate(directories):
-            paths = DatasetLoader.load_from_directory(directory)
+            paths = DatasetLoader.load_from_directory(directory, recursive=recursive)
             all_paths.extend(paths)
             
             label = labels[i] if labels else Path(directory).name
             all_labels.extend([label] * len(paths))
         
         return all_paths, all_labels
+    
+    @staticmethod
+    def load_with_subdirectory_labels(
+        root_directory: str,
+        extensions: Tuple[str, ...] = ('.jpg', '.jpeg', '.png', '.bmp')
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Load images from subdirectories, using subdirectory names as labels
+        
+        Example structure:
+            root_directory/
+                class_a/
+                    img1.jpg
+                    img2.jpg
+                class_b/
+                    img3.jpg
+                    
+        Returns:
+            Tuple of (image_paths, labels) where labels are subdirectory names
+        """
+        root = Path(root_directory)
+        image_paths = []
+        labels = []
+        
+        # Get all subdirectories
+        subdirs = [d for d in root.iterdir() if d.is_dir()]
+        
+        if not subdirs:
+            # No subdirectories, treat as single directory
+            paths = DatasetLoader.load_from_directory(str(root), extensions, recursive=False)
+            return paths, [root.name] * len(paths)
+        
+        # Load from each subdirectory
+        for subdir in sorted(subdirs):
+            paths = DatasetLoader.load_from_directory(str(subdir), extensions, recursive=True)
+            image_paths.extend(paths)
+            labels.extend([subdir.name] * len(paths))
+        
+        return image_paths, labels
+    
+    @staticmethod
+    def get_directory_structure(
+        directory: str,
+        max_depth: int = 3
+    ) -> Dict:
+        """
+        Get directory structure with image counts
+        
+        Args:
+            directory: Root directory
+            max_depth: Maximum depth to traverse
+            
+        Returns:
+            Dictionary with directory structure and counts
+        """
+        def count_images(path: Path, depth: int = 0):
+            if depth > max_depth:
+                return {"path": str(path), "count": 0, "subdirs": {}}
+            
+            result = {
+                "path": str(path),
+                "count": 0,
+                "subdirs": {}
+            }
+            
+            # Count images in current directory
+            for ext in ('.jpg', '.jpeg', '.png', '.bmp'):
+                result["count"] += len(list(path.glob(f"*{ext}")))
+                result["count"] += len(list(path.glob(f"*{ext.upper()}")))
+            
+            # Recurse into subdirectories
+            for subdir in sorted([d for d in path.iterdir() if d.is_dir()]):
+                result["subdirs"][subdir.name] = count_images(subdir, depth + 1)
+            
+            return result
+        
+        return count_images(Path(directory))
 
 
 # ==================== Evaluation Pipeline ====================
@@ -86,7 +192,8 @@ class EvaluationPipeline:
     def initialize_evaluator(self):
         """Initialize evaluator (lazy loading)"""
         if self.evaluator is None:
-            from diffusion_evaluator import DiffusionEvaluator
+            # from diffusion_evaluator import DiffusionEvaluator
+            from manifold_evaluator import DiffusionEvaluator
             self.evaluator = DiffusionEvaluator(self.config)
     
     def evaluate_dataset(
@@ -224,6 +331,20 @@ def parse_args():
         "--multi-dir", type=str, nargs='+',
         help="Multiple directories to compare"
     )
+    input_group.add_argument(
+        "--class-dir", type=str,
+        help="Directory with subdirectories as class labels"
+    )
+    
+    # Directory traversal options
+    parser.add_argument(
+        "--recursive", "-r", action="store_true",
+        help="Recursively search subdirectories for images"
+    )
+    parser.add_argument(
+        "--show-structure", action="store_true",
+        help="Show directory structure and exit (use with --dir or --class-dir)"
+    )
     
     # CSV-specific options
     parser.add_argument(
@@ -291,8 +412,21 @@ def main():
     """Main execution function"""
     args = parse_args()
     
+    # Show directory structure if requested
+    if args.show_structure:
+        if args.dir:
+            structure = DatasetLoader.get_directory_structure(args.dir)
+            print_directory_structure(structure)
+        elif args.class_dir:
+            structure = DatasetLoader.get_directory_structure(args.class_dir)
+            print_directory_structure(structure)
+        else:
+            print("Error: --show-structure requires --dir or --class-dir")
+        return
+    
     # Import here to avoid circular dependency
-    from diffusion_evaluator import EvalConfig
+    # from diffusion_evaluator import EvalConfig
+    from manifold_evaluator import EvalConfig
     
     # Create configuration
     config = EvalConfig(
@@ -311,9 +445,12 @@ def main():
     # Load dataset
     print("Loading dataset...")
     if args.dir:
-        image_paths = DatasetLoader.load_from_directory(args.dir)
+        image_paths = DatasetLoader.load_from_directory(args.dir, recursive=args.recursive)
         prompts = None
+        metadata = None
         print(f"Loaded {len(image_paths)} images from {args.dir}")
+        if args.recursive:
+            print("  (searched recursively in subdirectories)")
         
     elif args.csv:
         image_paths, prompts = DatasetLoader.load_from_csv(
@@ -321,39 +458,47 @@ def main():
             image_col=args.image_col,
             prompt_col=args.prompt_col
         )
+        metadata = None
         print(f"Loaded {len(image_paths)} images from {args.csv}")
         
     elif args.txt:
         image_paths = DatasetLoader.load_from_txt(args.txt)
         prompts = None
+        metadata = None
         print(f"Loaded {len(image_paths)} images from {args.txt}")
+        
+    elif args.class_dir:
+        image_paths, labels = DatasetLoader.load_with_subdirectory_labels(args.class_dir)
+        prompts = None
+        metadata = {"class": labels}
+        print(f"Loaded {len(image_paths)} images from {args.class_dir}")
+        print(f"  Found {len(set(labels))} classes: {sorted(set(labels))}")
         
     elif args.multi_dir:
         image_paths, labels = DatasetLoader.load_multiple_directories(
             args.multi_dir,
-            args.labels
+            args.labels,
+            recursive=args.recursive
         )
         prompts = None
+        metadata = {"dataset": labels}
         print(f"Loaded {len(image_paths)} images from {len(args.multi_dir)} directories")
+        if args.recursive:
+            print("  (searched recursively in subdirectories)")
+        for directory in args.multi_dir:
+            dir_count = sum(1 for l in labels if l == Path(directory).name or l in args.labels)
+            print(f"  {directory}: {dir_count} images")
+    
+    if len(image_paths) == 0:
+        print("Error: No images found!")
+        return
     
     # Initialize pipeline
     pipeline = EvaluationPipeline(config)
     
     # Run evaluation
     print("\nStarting evaluation...")
-    
-    if args.multi_dir and args.labels:
-        # Multi-dataset evaluation
-        datasets = []
-        for directory, label in zip(args.multi_dir, args.labels):
-            paths = DatasetLoader.load_from_directory(directory)
-            datasets.append((label, paths, None))
-        
-        df = pipeline.evaluate_multiple_datasets(datasets)
-    else:
-        # Single dataset evaluation
-        metadata = {"label": labels} if args.multi_dir else None
-        df = pipeline.evaluate_dataset(image_paths, prompts, metadata)
+    df = pipeline.evaluate_dataset(image_paths, prompts, metadata)
     
     # Save results
     print("\nSaving results...")
@@ -369,6 +514,13 @@ def main():
             df,
             os.path.join(args.output_dir, "statistics.csv")
         )
+        
+        # Print statistics by group if available
+        if "dataset" in df.columns or "class" in df.columns:
+            group_col = "dataset" if "dataset" in df.columns else "class"
+            stats = ResultAnalyzer.compute_statistics(df, group_by=group_col)
+            print(f"\nStatistics by {group_col}:")
+            print(stats.to_string(index=False))
     
     # Find outliers
     if args.find_outliers:
@@ -389,6 +541,36 @@ def main():
     print(f"Std criterion: {df['criterion'].std():.6f}")
     print(f"Results saved to: {args.output_dir}")
     print("="*60)
+
+
+def print_directory_structure(structure: Dict, indent: int = 0):
+    """Pretty print directory structure"""
+    path = Path(structure["path"])
+    name = path.name if indent > 0 else str(path)
+    count = structure["count"]
+    
+    prefix = "  " * indent
+    if count > 0:
+        print(f"{prefix}📁 {name} ({count} images)")
+    else:
+        print(f"{prefix}📁 {name}")
+    
+    # Print subdirectories
+    for subdir_name, subdir_data in structure["subdirs"].items():
+        print_directory_structure(subdir_data, indent + 1)
+    
+    # Print total if root
+    if indent == 0:
+        total = count_total_images(structure)
+        print(f"\nTotal images: {total}")
+
+
+def count_total_images(structure: Dict) -> int:
+    """Count total images in structure"""
+    total = structure["count"]
+    for subdir_data in structure["subdirs"].values():
+        total += count_total_images(subdir_data)
+    return total
 
 
 if __name__ == "__main__":
